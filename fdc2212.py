@@ -68,7 +68,7 @@ class FDC2212(object):
         self._fclk=43.3e6 # 43.3 MHz (internal)
         self._L=18e-6 # 18uH
         self._cap=33e-12 # 33pf
-        self._diff=True # differential
+        self._diff=False # differential
         self._div=2 # 
         self._Fsense = self._Csense = 0
         self._channel = 0
@@ -111,12 +111,13 @@ class FDC2212(object):
             # differential
             self._write16(FDC2212_CLOCK_DIVIDERS_CH0, 0x2001)
             self._write16(FDC2212_CLOCK_DIVIDERS_CH1, 0x2001)
-            self._div = 2
+            self._div = 10
         else:
             # single-ended
             self._write16(FDC2212_CLOCK_DIVIDERS_CH0, 0x1001)
             self._write16(FDC2212_CLOCK_DIVIDERS_CH1, 0x1001)
             self._div = 1
+            
 
     @property
     def channel(self):
@@ -172,11 +173,11 @@ class FDC2212(object):
         _reading = self._read_raw()
         try:
             # calculate fsensor (40MHz external ref)
-            self._Fsense=_reading*self._fclk/(2**28)
+            self._Fsense=(_reading*self._fclk/(2**28))
             # calculate Csensor (18uF and 33pF LC tank)
-            self._Csense = (1e12)*((1/(self._div*self._L*(2*pi*self._Fsense)**2))-self._cap)
+            self._Csense = (1e12)*((1/(self._L*(2*pi*self._Fsense)**2))-self._cap)
         except Exception as e:
-            if self.debug: print(e,'\terror on read')
+            if self.debug: print('Error on read:',e)
             pass
         return self._Csense
 
