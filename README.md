@@ -13,4 +13,4 @@ FDC2212: passing ✔
 - [ ] gain
 
 FDC2214: incomplete ❌
-- [ ]
+- [ ] muxing
