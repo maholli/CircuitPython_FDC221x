@@ -76,13 +76,10 @@ class FDC2212(object):
         self._write16(FDC2212_CLOCK_DIVIDERS_CH1, 0x1001)
         self._write16(FDC2212_DRIVE_CH0,          0x8C40)
         self._write16(FDC2212_DRIVE_CH1,          0x8C40)
-
-
     
     @property
     def clock(self):
         return self._fclk
-
     @clock.setter
     def clock(self, freq):
         self._fclk = freq 
@@ -90,7 +87,6 @@ class FDC2212(object):
     @property
     def inductance(self):
         return self._L
-
     @inductance.setter
     def inductance(self, induc):
         self._L = induc 
@@ -98,7 +94,6 @@ class FDC2212(object):
     @property
     def capacitance(self):
         return self._cap
-
     @capacitance.setter
     def clock(self, cap):
         self._cap = cap 
@@ -107,7 +102,6 @@ class FDC2212(object):
     def divider(self):
         # Sets differential/single-ended for BOTH channels
         return self._divider
-
     @divider.setter
     def divider(self, div):
         self._divider = div
@@ -121,11 +115,20 @@ class FDC2212(object):
             self._write16(FDC2212_CLOCK_DIVIDERS_CH0, 0x1001)
             self._write16(FDC2212_CLOCK_DIVIDERS_CH1, 0x1001)
             self._div = 1
-
+    @property
+    def sleep(self):
+        return self._sleep
+    @sleep.setter
+    def sleep(self,value):
+        if value:
+            self._config |= (1<<13)
+        else:
+            self._config &= ~(1<<13)            
+        self._write16(FDC2212_CONFIG, self._config)
+    
     @property
     def scan(self):
         return self._scan
-
     @scan.setter
     def scan(self, value):
         if value:
@@ -137,7 +140,6 @@ class FDC2212(object):
     @property
     def deglitch(self):
         return self._deglitch
-
     @deglitch.setter
     def deglitch(self, value):
         '''
@@ -155,7 +157,6 @@ class FDC2212(object):
     @property
     def channel(self):
         return self._channel
-
     @channel.setter
     def channel(self, channel=0):
         if channel not in (0,1):
