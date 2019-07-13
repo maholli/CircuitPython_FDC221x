@@ -11,7 +11,7 @@ FDC2212_CH0_UNREADCONV =const(0x0008)         #denotes unread CH0 reading in STA
 FDC2212_CH1_UNREADCONV =const(0x0004)         #denotes unread CH1 reading in STATUS register
 FDC2212_CH2_UNREADCONV =const(0x0002)         #denotes unread CH2 reading in STATUS register
 FDC2212_CH3_UNREADCONV =const(0x0001)         #denotes unread CH3 reading in STATUS register
-
+DEGLITCH_MASK          =const(0xFFF8)
 
 #registers
 FDC2212_DEVICE_ID            =const(0x7F)
@@ -52,8 +52,20 @@ class FDC2212(object):
         if self._read16(FDC2212_DEVICE_ID) not in (0x3055,0x3054):
             raise RuntimeError('Failed to find FD2212, check wiring!')
         self.debug=debug
-        self._write16(FDC2212_MUX_CONFIG,         0x020D)
-        self._write16(FDC2212_CONFIG,             0x1C01)
+        self._mux = 0x020D
+        self._config = 0x1C01
+        self._fclk=43.3e6 # 43.3 MHz (internal)
+        self._L=18e-6 # 18uH
+        self._cap=33e-12 # 33pf
+        self._diff=False # differential
+        self._div=1 # 
+        self._Fsense = self._Csense = 0
+        self._channel = 0
+        self._MSB = FDC2212_DATA_CH0_MSB
+        self._LSB = FDC2212_DATA_CH0_LSB
+
+        self._write16(FDC2212_MUX_CONFIG,         self._mux)
+        self._write16(FDC2212_CONFIG,             self._config)
         self._write16(FDC2212_RCOUNT_CH0,         0xFFFF)
         self._write16(FDC2212_RCOUNT_CH1,         0xFFFF)
         self._write16(FDC2212_OFFSET_CH0,         0x0000)
@@ -65,15 +77,7 @@ class FDC2212(object):
         self._write16(FDC2212_DRIVE_CH0,          0x8C40)
         self._write16(FDC2212_DRIVE_CH1,          0x8C40)
 
-        self._fclk=43.3e6 # 43.3 MHz (internal)
-        self._L=18e-6 # 18uH
-        self._cap=33e-12 # 33pf
-        self._diff=False # differential
-        self._div=2 # 
-        self._Fsense = self._Csense = 0
-        self._channel = 0
-        self._MSB = FDC2212_DATA_CH0_MSB
-        self._LSB = FDC2212_DATA_CH0_LSB
+
     
     @property
     def clock(self):
@@ -100,24 +104,53 @@ class FDC2212(object):
         self._cap = cap 
 
     @property
-    def differential(self):
+    def divider(self):
         # Sets differential/single-ended for BOTH channels
-        return self._diff
+        return self._divider
 
-    @differential.setter
-    def differential(self, diff):
-        self._diff = diff
-        if self._diff:
+    @divider.setter
+    def divider(self, div):
+        self._divider = div
+        if self._divider:
             # differential
             self._write16(FDC2212_CLOCK_DIVIDERS_CH0, 0x2001)
             self._write16(FDC2212_CLOCK_DIVIDERS_CH1, 0x2001)
-            self._div = 10
+            self._div = 2
         else:
             # single-ended
             self._write16(FDC2212_CLOCK_DIVIDERS_CH0, 0x1001)
             self._write16(FDC2212_CLOCK_DIVIDERS_CH1, 0x1001)
             self._div = 1
-            
+
+    @property
+    def scan(self):
+        return self._scan
+
+    @scan.setter
+    def scan(self, value):
+        if value:
+            self._mux |= (1<<15)
+        else:
+            self._mux &= ~(1<<15)            
+        self._write16(FDC2212_MUX_CONFIG, self._mux)
+
+    @property
+    def deglitch(self):
+        return self._deglitch
+
+    @deglitch.setter
+    def deglitch(self, value):
+        '''
+        Input deglitch filter bandwidth.
+        Select the lowest setting that exceeds the oscillation tank
+        oscillation frequency.
+        1MHz,3.3MHz,10MHz,33MHz
+        '''
+        if value not in (1,4,5,7):
+            raise ValueError("Unsupported deglitch setting.")
+        self._mux = (self._mux & DEGLITCH_MASK) | value
+        self._write16(FDC2212_MUX_CONFIG, self._mux)
+        if self.debug: print(hex(self._mux))
 
     @property
     def channel(self):
@@ -125,21 +158,18 @@ class FDC2212(object):
 
     @channel.setter
     def channel(self, channel=0):
-        if channel not in (0,1,10):
+        if channel not in (0,1):
             raise ValueError("Unsupported channel.")
         if channel == 0:
-            self._write16(FDC2212_MUX_CONFIG, 0x020D)
-            self._write16(FDC2212_CONFIG,     0x1C01)
+            self._config &= ~(1<<14)
+            self._write16(FDC2212_CONFIG,self._config)
             self._MSB = FDC2212_DATA_CH0_MSB
             self._LSB = FDC2212_DATA_CH0_LSB
         if channel == 1:
-            self._write16(FDC2212_MUX_CONFIG, 0x020D)
-            self._write16(FDC2212_CONFIG,     0x5C01)
+            self._config |= (1<<14)
+            self._write16(FDC2212_CONFIG,self._config)
             self._MSB = FDC2212_DATA_CH1_MSB
             self._LSB = FDC2212_DATA_CH1_LSB
-        if channel == 10:
-            self._write16(FDC2212_MUX_CONFIG, 0x820D)
-            self._write16(FDC2212_CONFIG,     0x5C01)
         self._channel = channel
 
     def _read_into(self, address, buf, count=None):
@@ -173,35 +203,10 @@ class FDC2212(object):
         _reading = self._read_raw()
         try:
             # calculate fsensor (40MHz external ref)
-            self._Fsense=(_reading*self._fclk/(2**28))
+            self._Fsense=(self._div*_reading*self._fclk/(2**28))
             # calculate Csensor (18uF and 33pF LC tank)
             self._Csense = (1e12)*((1/(self._L*(2*pi*self._Fsense)**2))-self._cap)
         except Exception as e:
             if self.debug: print('Error on read:',e)
             pass
         return self._Csense
-
-    # def scan(self,channels=10):
-    #     _scanout=[]
-    #     _cha = _chb = 0
-    #     if channels == 10: 
-    #         _cha = (self._read16(FDC2212_DATA_CH0_MSB) & FDC2212_DATA_CHx_MASK_DATA) << 16
-    #         _cha |= self._read16(FDC2212_DATA_CH0_LSB)
-    #         _chb = (self._read16(FDC2212_DATA_CH1_MSB) & FDC2212_DATA_CHx_MASK_DATA) << 16
-    #         _chb |= self._read16(FDC2212_DATA_CH1_LSB)
-    #     elif channels == 23:
-    #         _cha = (self._read16(FDC2212_DATA_CH2_MSB) & FDC2212_DATA_CHx_MASK_DATA) << 16
-    #         _cha |= self._read16(FDC2212_DATA_CH2_LSB)
-    #         _chb = (self._read16(FDC2212_DATA_CH3_MSB) & FDC2212_DATA_CHx_MASK_DATA) << 16
-    #         _chb |= self._read16(FDC2212_DATA_CH3_LSB)
-    #     try:
-    #         for _ch in (_cha,_chb):
-    #             # calculate fsensor (40MHz external ref)
-    #             _Freq = _ch*(40e6)/(2**28)
-    #             # calculate Csensor (18uF and 33pF LC tank)
-    #             _Cap = (1e12)*((1/((18e-6)*(2*pi*_Freq)**2))-(33e-12))
-    #             _scanout.append(_Cap)
-    #     except Exception as e:
-    #         print('error on read',e)
-    #     return _scanout
-
