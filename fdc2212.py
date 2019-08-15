@@ -50,14 +50,14 @@ class FDC2212(object):
         self._device = I2CDevice(i2c, address)
         # Check for valid chip ID
         if self._read16(FDC2212_DEVICE_ID) not in (0x3055,0x3054):
-            raise RuntimeError('Failed to find FD2212, check wiring!')
+            raise RuntimeError('Failed to find FDC2212/FDC2214, check wiring!')
         self.debug=debug
         self._mux = 0x020D
         self._config = 0x1C01
         self._fclk=43.3e6 # 43.3 MHz (internal)
         self._L=18e-6 # 18uH
         self._cap=33e-12 # 33pf
-        self._diff=False # differential
+        self._diff=False # differential?
         self._div=1 # 
         self._Fsense = self._Csense = 0
         self._channel = 0
@@ -95,7 +95,7 @@ class FDC2212(object):
     def capacitance(self):
         return self._cap
     @capacitance.setter
-    def clock(self, cap):
+    def capacitance(self, cap):
         self._cap = cap 
 
     @property
