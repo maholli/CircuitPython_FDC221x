@@ -1,7 +1,7 @@
 from micropython import const
 from adafruit_bus_device.i2c_device import I2CDevice
 from math import pi
-
+import time
 FDC2212_I2C_ADDR_0   =const(0x2A)
 FDC2212_I2C_ADDR_1   =const(0x2B)
 # Address is 0x2A (default) or 0x2B (if ADDR is high)
@@ -99,6 +99,24 @@ class FDC2212(object):
         self._cap = cap 
 
     @property
+    def RCOUNT(self):
+        return self._RCOUNT
+    @RCOUNT.setter
+    def RCOUNT(self, rcount):
+        self._RCOUNT = rcount 
+        self._write16(FDC2212_RCOUNT_CH0,rcount)
+        self._write16(FDC2212_RCOUNT_CH1,rcount)
+
+    @property
+    def SETTLE(self):
+        return self._SETTLE
+    @SETTLE.setter
+    def SETTLE(self, settle):
+        self._SETTLE = settle
+        self._write16(FDC2212_SETTLECOUNT_CH0,settle)
+        self._write16(FDC2212_SETTLECOUNT_CH1,settle)
+
+    @property
     def divider(self):
         # Sets differential/single-ended for BOTH channels
         return self._divider
@@ -182,11 +200,16 @@ class FDC2212(object):
             count = len(buf)
         with self._device as i2c:
             i2c.write_then_readinto(bytes([address & 0xFF]), buf,
-                                    in_end=count, stop=False)    
+                                    in_end=count, stop=False)   
+        # [print(hex(i),'\t',end='') for i in self._BUFFER]
+        # print('')
+
     def _read16(self, address):
         # Read a 16-bit unsigned value for from the specified address.
         self._read_into(address, self._BUFFER, count=2)
-        return self._BUFFER[0] << 8 | self._BUFFER[1]
+        _raw = self._BUFFER[0] << 8 | self._BUFFER[1]        
+        return _raw
+
 
     def _write16(self, address, value):
         # Write a 16-bit unsigned value to the specified address.
@@ -199,6 +222,28 @@ class FDC2212(object):
         _reading = (self._read16(self._MSB) & FDC2212_DATA_CHx_MASK_DATA) << 16
         _reading |= self._read16(self._LSB)
         return _reading
+
+    def burst(self,cnt=10):
+        _burst = []
+        _buff = []
+        test = bytearray(4)
+        t1=time.monotonic_ns()        
+        with self._device as i2c:
+            for _ in range(cnt):
+                i2c.write_then_readinto(bytes([0x00]),test,in_end=2, stop=True)
+                i2c.write_then_readinto(bytes([0x01]),test,in_start=2,in_end=4,stop=True)
+                # [print(hex(i),'\t',end='') for i in test]
+                # print('')
+                _buff.append((test[0],test[1],test[2],test[3]))
+        t1=time.monotonic_ns()-t1
+        # print(_buff)
+        print('Freq:{} Hz'.format(cnt/(t1*1e-9)))
+        for item in _buff:
+            _dat = (((item[0] << 8)| item[1]) & FDC2212_DATA_CHx_MASK_DATA) << 16
+            _dat |= ((item[2] << 8)| item[3])
+            self._Fsense=(self._div*_dat*self._fclk/(2**28))
+            _burst.append((1e12)*((1/(self._L*(2*pi*self._Fsense)**2))-self._cap))
+        return _burst
 
     def read(self):
         _reading = self._read_raw()
