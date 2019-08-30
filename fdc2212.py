@@ -26,6 +26,7 @@ FDC2212_SETTLECOUNT_CH1      =const(0x11)
 FDC2212_CLOCK_DIVIDERS_CH0   =const(0x14)
 FDC2212_CLOCK_DIVIDERS_CH1   =const(0x15)
 FDC2212_STATUS               =const(0x18)
+FDC2212_STATUS_CONFIG        =const(0x19)
 FDC2212_DATA_CH0_MSB         =const(0x00)
 FDC2212_DATA_CH0_LSB         =const(0x01)
 FDC2212_DATA_CH1_MSB         =const(0x02)
@@ -58,7 +59,8 @@ class FDC2212(object):
         self._L=18e-6 # 18uH
         self._cap=33e-12 # 33pf
         self._diff=False # differential?
-        self._div=1 # 
+        self._div=1 #
+        self._Idrive = 0 
         self._Fsense = self._Csense = 0
         self._channel = 0
         self._MSB = FDC2212_DATA_CH0_MSB
@@ -82,7 +84,10 @@ class FDC2212(object):
         return self._fclk
     @clock.setter
     def clock(self, freq):
-        self._fclk = freq 
+        self._fclk = freq
+        if freq != 43.3e6:
+             self._config |= (1<<9)
+             self._write16(FDC2212_CONFIG,self._config)
     
     @property
     def inductance(self):
@@ -115,6 +120,28 @@ class FDC2212(object):
         self._SETTLE = settle
         self._write16(FDC2212_SETTLECOUNT_CH0,settle)
         self._write16(FDC2212_SETTLECOUNT_CH1,settle)
+
+    @property
+    def Idrive(self):
+        return self._Idrive
+    @Idrive.setter
+    def Idrive(self,idrive):
+        self._Idrive=idrive
+        self._write16(FDC2212_DRIVE_CH0,idrive)
+        self._write16(FDC2212_DRIVE_CH1,idrive)
+
+    @property
+    def status(self):
+        return self._read16(FDC2212_STATUS)
+    
+    @property
+    def status_config(self):
+        self._status_config = self._read16(FDC2212_STATUS_CONFIG)
+        return self._status_config
+    @status_config.setter
+    def status_config(self,setting) :
+        self._status_config = setting
+        self._write16(FDC2212_STATUS_CONFIG, self._status_config)
 
     @property
     def divider(self):
@@ -172,11 +199,14 @@ class FDC2212(object):
         self._write16(FDC2212_MUX_CONFIG, self._mux)
         if self.debug: print(hex(self._mux))
 
+    
+
+
     @property
     def channel(self):
         return self._channel
     @channel.setter
-    def channel(self, channel=0):
+    def channel(self, channel):
         if channel not in (0,1):
             raise ValueError("Unsupported channel.")
         if channel == 0:
@@ -226,21 +256,20 @@ class FDC2212(object):
     def burst(self,cnt=10):
         _burst = []
         _buff = []
-        test = bytearray(4)
+        test = bytearray(2)
         t1=time.monotonic_ns()        
         with self._device as i2c:
             for _ in range(cnt):
-                i2c.write_then_readinto(bytes([0x00]),test,in_end=2, stop=True)
-                i2c.write_then_readinto(bytes([0x01]),test,in_start=2,in_end=4,stop=True)
+                i2c.write_then_readinto(bytes([0x01]),test,stop=False)
                 # [print(hex(i),'\t',end='') for i in test]
                 # print('')
-                _buff.append((test[0],test[1],test[2],test[3]))
+                _buff.append((test[0],test[1]))
         t1=time.monotonic_ns()-t1
         # print(_buff)
         print('Freq:{} Hz'.format(cnt/(t1*1e-9)))
         for item in _buff:
-            _dat = (((item[0] << 8)| item[1]) & FDC2212_DATA_CHx_MASK_DATA) << 16
-            _dat |= ((item[2] << 8)| item[3])
+            _dat = 0x1ed0000
+            _dat |= ((item[0] << 8)| item[1])
             self._Fsense=(self._div*_dat*self._fclk/(2**28))
             _burst.append((1e12)*((1/(self._L*(2*pi*self._Fsense)**2))-self._cap))
         return _burst
