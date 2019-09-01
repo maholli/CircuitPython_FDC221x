@@ -54,7 +54,8 @@ class FDC2212(object):
             raise RuntimeError('Failed to find FDC2212/FDC2214, check wiring!')
         self.debug=debug
         self._mux = 0x020D
-        self._config = 0x1C01
+        self._config = 0x1401 # 0001010000000001
+        self._fulldrive = True
         self._fclk=43.3e6 # 43.3 MHz (internal)
         self._L=18e-6 # 18uH
         self._cap=33e-12 # 33pf
@@ -86,8 +87,9 @@ class FDC2212(object):
     def clock(self, freq):
         self._fclk = freq
         if freq != 43.3e6:
-             self._config |= (1<<9)
-             self._write16(FDC2212_CONFIG,self._config)
+            print('External Clock Enabled')
+            self._config |= (1<<9)
+            self._write16(FDC2212_CONFIG,self._config)
     
     @property
     def inductance(self):
@@ -142,6 +144,20 @@ class FDC2212(object):
     def status_config(self,setting) :
         self._status_config = setting
         self._write16(FDC2212_STATUS_CONFIG, self._status_config)
+
+    @property
+    def full_drive(self):
+        return self._fulldrive
+    @full_drive.setter
+    def full_drive(self,state):
+        # full-current drive on all channels
+        self._fulldrive=state
+        if not state: # disabled
+            self._config |= (1<<11)
+        else: # enable 
+            self._config &= ~(1<<11)            
+        self._write16(FDC2212_CONFIG, self._config)
+
 
     @property
     def divider(self):
@@ -285,3 +301,21 @@ class FDC2212(object):
             if self.debug: print('Error on read:',e)
             pass
         return self._Csense
+
+    def read_both(self):
+        output=[]
+        _reading1 = (self._read16(FDC2212_DATA_CH0_MSB) & FDC2212_DATA_CHx_MASK_DATA) << 16
+        _reading1 |= self._read16(FDC2212_DATA_CH0_LSB)
+        _reading2 = (self._read16(FDC2212_DATA_CH1_MSB) & FDC2212_DATA_CHx_MASK_DATA) << 16
+        _reading2 |= self._read16(FDC2212_DATA_CH1_LSB)
+        try:
+            for i in _reading1,_reading2:
+                # calculate fsensor (40MHz external ref)
+                self._Fsense=(self._div*i*self._fclk/(2**28))
+                # calculate Csensor (18uF and 33pF LC tank)
+                self._Csense = (1e12)*((1/(self._L*(2*pi*self._Fsense)**2))-self._cap)
+                output.append(self._Csense)
+        except Exception as e:
+            if self.debug: print('Error on read:',e)
+            pass
+        return output
