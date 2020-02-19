@@ -1,10 +1,16 @@
 from micropython import const
 from adafruit_bus_device.i2c_device import I2CDevice
 from math import pi
+from adafruit_register.i2c_struct import Struct, ROUnaryStruct, UnaryStruct
+from adafruit_register.i2c_bits import ROBits, RWBits
+from adafruit_register.i2c_bit import ROBit, RWBit
 import time
+
 FDC2212_I2C_ADDR_0   =const(0x2A)
 FDC2212_I2C_ADDR_1   =const(0x2B)
 # Address is 0x2A (default) or 0x2B (if ADDR is high)
+
+
 
 #bitmasks
 FDC2212_CH0_UNREADCONV =const(0x0008)         #denotes unread CH0 reading in STATUS register
@@ -14,7 +20,7 @@ FDC2212_CH3_UNREADCONV =const(0x0001)         #denotes unread CH3 reading in STA
 DEGLITCH_MASK          =const(0xFFF8)
 
 #registers
-FDC2212_DEVICE_ID            =const(0x7F)
+FDC2212i2c_device_ID         =const(0x7F)
 FDC2212_MUX_CONFIG           =const(0x1B)
 FDC2212_CONFIG               =const(0x1A)
 FDC2212_RCOUNT_CH0           =const(0x08)
@@ -33,11 +39,25 @@ FDC2212_DATA_CH1_MSB         =const(0x02)
 FDC2212_DATA_CH1_LSB         =const(0x03)
 FDC2212_DRIVE_CH0            =const(0x1E)
 FDC2212_DRIVE_CH1            =const(0x1F)
+FDC2212_RESET_DEV            =const(0x1C)
 
 # mask for 28bit data to filter out flag bits
 FDC2212_DATA_CHx_MASK_DATA          =const(0x0FFF) 
 FDC2212_DATA_CHx_MASK_ERRAW         =const(0x1000) 
 FDC2212_DATA_CHx_MASK_ERRWD         =const(0x2000) 
+
+class _ScaledReadOnlyStruct(Struct):
+    def __init__(self, register_address, struct_format, scale):
+        super(_ScaledReadOnlyStruct, self).__init__(
+            register_address, struct_format)
+        self.scale = scale
+
+    def __get__(self, obj, objtype=None):
+        result = super(_ScaledReadOnlyStruct, self).__get__(obj, objtype)
+        return tuple(self.scale * v for v in result)
+
+    def __set__(self, obj, value):
+        raise NotImplementedError()
 
 class FDC2212(object):
     """
@@ -47,38 +67,86 @@ class FDC2212(object):
     # Note this is NOT thread-safe or re-entrant by design!   
     """
     _BUFFER = bytearray(8)
+    RESOLUTION = 2**28
+
+
+    # Misc Settings
+    rst =  RWBit(FDC2212_RESET_DEV, 15,2,False)
+    gain = RWBits(2,FDC2212_RESET_DEV,9,2,False)
+    drdy0 = ROBit(FDC2212_STATUS,6,2,False)
+    drdy1 = ROBit(FDC2212_STATUS,6,2,False)
+    drdy01 = ROBits(2,FDC2212_STATUS,2,2,False)
+    status= RWBits(16,FDC2212_STATUS,0,2,False)
+
+    # CONFIG register settings
+    slp         =  RWBit(FDC2212_CONFIG, 13,2,False)
+    ref_clk     =  RWBit(FDC2212_CONFIG,  9,2,False)
+    high_drv    =  RWBit(FDC2212_CONFIG,  6,2,False)
+    active_mode = RWBits(2,FDC2212_CONFIG,14,2,False)
+    config_all  = RWBits(16,FDC2212_CONFIG,0,2,False) 
+
+    # CLOCK DIVIDERS
+    ch0_fsel = RWBits(2,FDC2212_CLOCK_DIVIDERS_CH0,12,2,False)
+    ch0_fdiv = RWBits(10,FDC2212_CLOCK_DIVIDERS_CH0,0,2,False)
+    ch0_clk  = RWBits(16,FDC2212_CLOCK_DIVIDERS_CH0,0,2,False)
+    ch1_fsel = RWBits(2,FDC2212_CLOCK_DIVIDERS_CH1,12,2,False)
+    ch1_fdiv = RWBits(10,FDC2212_CLOCK_DIVIDERS_CH1,0,2,False)
+    ch1_clk  = RWBits(16,FDC2212_CLOCK_DIVIDERS_CH1,0,2,False)
+
+    # DATA registers
+    data_ch0a = ROBits(16,FDC2212_DATA_CH0_MSB,0,2,False)
+    data_ch0b = ROBits(16,FDC2212_DATA_CH0_LSB,0,2,False)
+    data_ch1a = ROBits(16,FDC2212_DATA_CH1_MSB,0,2,False)
+    data_ch1b = ROBits(16,FDC2212_DATA_CH1_LSB,0,2,False)
+
+    # MUX_CONFIG register
+    auto_scan =  RWBit(FDC2212_MUX_CONFIG,15,2,False)
+    rr_seq = RWBits(2,FDC2212_MUX_CONFIG,13,2,False)
+    dglitch = RWBits(3,FDC2212_MUX_CONFIG,0,2,False) 
+
     def __init__(self, i2c, *, address=FDC2212_I2C_ADDR_0,debug=False):
-        self._device = I2CDevice(i2c, address)
+        self.i2c_device = I2CDevice(i2c, address)
+        self.rst=True
         # Check for valid chip ID
-        if self._read16(FDC2212_DEVICE_ID) not in (0x3055,0x3054):
+        if self._read16(FDC2212i2c_device_ID) not in (0x3055,0x3054):
             raise RuntimeError('Failed to find FDC2212/FDC2214, check wiring!')
         self.debug=debug
-        self._mux = 0x020D
-        self._config = 0x1401 # 0001010000000001
+        '''
+        CONFIG Register
+         00     0   [1]   0   [1]  0  [0]  1    0    [000001]
+        CHAN   SLP  RES DRIVE RES CLK RES INT HDRIVE RES
+
+        MUX_CONFIG
+         1       00    [00 0100 0001]    101
+        SCAN   RR_SEQ      RES         DGLITCH        
+        '''
+        self._config = 0x1481
+        self._mux = 0x820D
+
+        # Initalize varriables
         self._fulldrive = True
         self._fclk=43.3e6 # 43.3 MHz (internal)
         self._L=18e-6 # 18uH
         self._cap=33e-12 # 33pf
-        self._diff=False # differential?
-        self._div=1 #
-        self._Idrive = 0 
+        self._differential=True # differential (default)
+        self._div=1
+        self.fref = self._fclk/1
+        self._Idrive = 1
         self._Fsense = self._Csense = 0
         self._channel = 0
         self._MSB = FDC2212_DATA_CH0_MSB
         self._LSB = FDC2212_DATA_CH0_LSB
 
-        self._write16(FDC2212_MUX_CONFIG,         self._mux)
-        self._write16(FDC2212_CONFIG,             self._config)
         self._write16(FDC2212_RCOUNT_CH0,         0xFFFF)
         self._write16(FDC2212_RCOUNT_CH1,         0xFFFF)
-        self._write16(FDC2212_OFFSET_CH0,         0x0000)
-        self._write16(FDC2212_OFFSET_CH1,         0x0000)
         self._write16(FDC2212_SETTLECOUNT_CH0,    0x0400)
         self._write16(FDC2212_SETTLECOUNT_CH1,    0x0400)
         self._write16(FDC2212_CLOCK_DIVIDERS_CH0, 0x1001)
         self._write16(FDC2212_CLOCK_DIVIDERS_CH1, 0x1001)
-        self._write16(FDC2212_DRIVE_CH0,          0x8C40)
-        self._write16(FDC2212_DRIVE_CH1,          0x8C40)
+        self._write16(FDC2212_DRIVE_CH0,          0x4800)
+        self._write16(FDC2212_DRIVE_CH1,          0x4800)
+        self._write16(FDC2212_MUX_CONFIG,         self._mux)
+        self._write16(FDC2212_CONFIG,             self._config)   
     
     @property
     def clock(self):
@@ -99,10 +167,10 @@ class FDC2212(object):
         self._L = induc 
 
     @property
-    def capacitance(self):
+    def selfcitance(self):
         return self._cap
-    @capacitance.setter
-    def capacitance(self, cap):
+    @selfcitance.setter
+    def selfcitance(self, cap):
         self._cap = cap 
 
     @property
@@ -119,6 +187,10 @@ class FDC2212(object):
         return self._SETTLE
     @SETTLE.setter
     def SETTLE(self, settle):
+        '''
+        Settle time = (SETTLECOUNT * 16)/Fclk
+        (0xFFFF*16)/40E6=26.2ms
+        '''
         self._SETTLE = settle
         self._write16(FDC2212_SETTLECOUNT_CH0,settle)
         self._write16(FDC2212_SETTLECOUNT_CH1,settle)
@@ -132,9 +204,9 @@ class FDC2212(object):
         self._write16(FDC2212_DRIVE_CH0,idrive)
         self._write16(FDC2212_DRIVE_CH1,idrive)
 
-    @property
-    def status(self):
-        return self._read16(FDC2212_STATUS)
+    # @property
+    # def status(self):
+    #     return self._read16(FDC2212_STATUS)
     
     @property
     def status_config(self):
@@ -152,30 +224,30 @@ class FDC2212(object):
     def full_drive(self,state):
         # full-current drive on all channels
         self._fulldrive=state
-        if not state: # disabled
+        if state: # enabled
             self._config |= (1<<11)
-        else: # enable 
+        else: # disabled 
             self._config &= ~(1<<11)            
         self._write16(FDC2212_CONFIG, self._config)
 
-
     @property
-    def divider(self):
+    def differential(self):
         # Sets differential/single-ended for BOTH channels
-        return self._divider
-    @divider.setter
-    def divider(self, div):
-        self._divider = div
-        if self._divider:
-            # differential
-            self._write16(FDC2212_CLOCK_DIVIDERS_CH0, 0x2001)
-            self._write16(FDC2212_CLOCK_DIVIDERS_CH1, 0x2001)
-            self._div = 2
-        else:
-            # single-ended
+        return self._differential
+    @differential.setter
+    def differential(self, div):
+        self._differential = div
+        if self._differential:
+            # differential (default)
             self._write16(FDC2212_CLOCK_DIVIDERS_CH0, 0x1001)
             self._write16(FDC2212_CLOCK_DIVIDERS_CH1, 0x1001)
             self._div = 1
+        else:
+            # single-ended
+            self._write16(FDC2212_CLOCK_DIVIDERS_CH0, 0x2001)
+            self._write16(FDC2212_CLOCK_DIVIDERS_CH1, 0x2001)
+            self._div = 2
+
     @property
     def sleep(self):
         return self._sleep
@@ -189,14 +261,16 @@ class FDC2212(object):
     
     @property
     def scan(self):
-        return self._scan
+        return bool(self.auto_scan)
     @scan.setter
     def scan(self, value):
+        self.slp=True
         if value:
-            self._mux |= (1<<15)
+            self.auto_scan=True
+            self.rr_seq=0x00 #CH0 & CH1
         else:
-            self._mux &= ~(1<<15)            
-        self._write16(FDC2212_MUX_CONFIG, self._mux)
+            self.auto_scan=False          
+        self.slp=False
 
     @property
     def deglitch(self):
@@ -210,13 +284,9 @@ class FDC2212(object):
         1MHz,3.3MHz,10MHz,33MHz
         '''
         if value not in (1,4,5,7):
-            raise ValueError("Unsupported deglitch setting.")
-        self._mux = (self._mux & DEGLITCH_MASK) | value
-        self._write16(FDC2212_MUX_CONFIG, self._mux)
+            raise ValueError("Unsupported deglitch setting. Valid values are: 1(1MHz),4(3.3MHz),5(10MHz),7(33MHz)")
+        self.dglitch=value
         if self.debug: print(hex(self._mux))
-
-    
-
 
     @property
     def channel(self):
@@ -244,7 +314,7 @@ class FDC2212(object):
         assert len(buf) > 0
         if count is None:
             count = len(buf)
-        with self._device as i2c:
+        with self.i2c_device as i2c:
             i2c.write_then_readinto(bytes([address & 0xFF]), buf,
                                     in_end=count, stop=False)   
         # [print(hex(i),'\t',end='') for i in self._BUFFER]
@@ -259,10 +329,11 @@ class FDC2212(object):
 
     def _write16(self, address, value):
         # Write a 16-bit unsigned value to the specified address.
-        with self._device as i2c:
-            self._BUFFER[0] = address & 0xFF
-            self._BUFFER[1] = (value >> 8) & 0xFF
-            i2c.write(self._BUFFER, end=2)
+        self._BUFFER[0] = address & 0xFF
+        self._BUFFER[1] = (value>>8) & 0xFF
+        self._BUFFER[2] = (value) & 0xff
+        with self.i2c_device as i2c:
+            i2c.write(self._BUFFER, end=3)
 
     def _read_raw(self):
         _reading = (self._read16(self._MSB) & FDC2212_DATA_CHx_MASK_DATA) << 16
@@ -274,7 +345,7 @@ class FDC2212(object):
         _buff = []
         test = bytearray(2)
         t1=time.monotonic_ns()        
-        with self._device as i2c:
+        with self.i2c_device as i2c:
             for _ in range(cnt):
                 i2c.write_then_readinto(bytes([0x01]),test,stop=False)
                 # [print(hex(i),'\t',end='') for i in test]
@@ -286,7 +357,7 @@ class FDC2212(object):
         for item in _buff:
             _dat = 0x1ed0000
             _dat |= ((item[0] << 8)| item[1])
-            self._Fsense=(self._div*_dat*self._fclk/(2**28))
+            self._Fsense=(self._div*_dat*self._fclk/self.RESOLUTION)
             _burst.append((1e12)*((1/(self._L*(2*pi*self._Fsense)**2))-self._cap))
         return _burst
 
@@ -294,7 +365,7 @@ class FDC2212(object):
         _reading = self._read_raw()
         try:
             # calculate fsensor (40MHz external ref)
-            self._Fsense=(self._div*_reading*self._fclk/(2**28))
+            self._Fsense=(self._div*_reading*self._fclk/self.RESOLUTION)
             # calculate Csensor (18uF and 33pF LC tank)
             self._Csense = (1e12)*((1/(self._L*(2*pi*self._Fsense)**2))-self._cap)
         except Exception as e:
@@ -302,20 +373,42 @@ class FDC2212(object):
             pass
         return self._Csense
 
-    def read_both(self):
+    def read_both(self,errchck=False):
+        '''
+        Reads CH0 and CH1 data channels and returns a tuple:
+        (CH0_DATA,CH1_DATA,CH0_ERR_AW,CH0_ERR_WD,CH1_ERR_AW,CH1_ERR_WD)
+        '''
         output=[]
-        _reading1 = (self._read16(FDC2212_DATA_CH0_MSB) & FDC2212_DATA_CHx_MASK_DATA) << 16
-        _reading1 |= self._read16(FDC2212_DATA_CH0_LSB)
-        _reading2 = (self._read16(FDC2212_DATA_CH1_MSB) & FDC2212_DATA_CHx_MASK_DATA) << 16
-        _reading2 |= self._read16(FDC2212_DATA_CH1_LSB)
+        err=0
+        s=time.monotonic()
+        while self.drdy01!=3:
+            if time.monotonic()-s>10:
+                return(0,0,0,0,0,0)
+            pass           
+        _reading1 = self.data_ch0a
+        if errchck:            
+            output.append(_reading1 & FDC2212_DATA_CHx_MASK_ERRAW)#ch0 err_aw
+            output.append(_reading1 & FDC2212_DATA_CHx_MASK_ERRWD)#ch0 err_wdt
+        _reading1 = (_reading1 & FDC2212_DATA_CHx_MASK_DATA) << 16
+        _reading1 |= self.data_ch0b
+
+        _reading2 = self.data_ch1a
+        if errchck:            
+            output.append(_reading2 & FDC2212_DATA_CHx_MASK_ERRAW)#ch1 err_aw
+            output.append(_reading2 & FDC2212_DATA_CHx_MASK_ERRWD)#ch1 err_wdt
+        _reading2 = (_reading2 & FDC2212_DATA_CHx_MASK_DATA) << 16
+        _reading2 |= self.data_ch1b
         try:
             for i in _reading1,_reading2:
                 # calculate fsensor (40MHz external ref)
-                self._Fsense=(self._div*i*self._fclk/(2**28))
-                # calculate Csensor (18uF and 33pF LC tank)
+                # self._Fsense=(self._div*i*self._fclk/self.RESOLUTION)
+                # self._Fsense=self.ch_sel*self.fref*((i/self.RESOLUTION))
+                self._Fsense=1*self.fref*((i/self.RESOLUTION))
+
+                # calculate Csensor (18uF and 33pF LC tank) in pF
                 self._Csense = (1e12)*((1/(self._L*(2*pi*self._Fsense)**2))-self._cap)
                 output.append(self._Csense)
         except Exception as e:
             if self.debug: print('Error on read:',e)
-            pass
-        return output
+            return output.append((0,0)) 
+        return output 
