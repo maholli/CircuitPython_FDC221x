@@ -366,7 +366,7 @@ class FDC2212(object):
         try:
             # calculate fsensor (40MHz external ref)
             self._Fsense=(self._div*_reading*self._fclk/self.RESOLUTION)
-            # calculate Csensor (18uF and 33pF LC tank)
+            # calculate Csensor (18uH and 33pF LC tank)
             self._Csense = (1e12)*((1/(self._L*(2*pi*self._Fsense)**2))-self._cap)
         except Exception as e:
             if self.debug: print('Error on read:',e)
